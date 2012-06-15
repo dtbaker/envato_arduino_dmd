@@ -1,7 +1,7 @@
 /**
   * Arduino + DMD sales notification script
   * Author: dtbaker
-  * Website: https://github.com/dtbaker/envato-scripts/arduino-dmd
+  * Website: https://github.com/dtbaker/envato_arduino_dmd
   */
 
 
