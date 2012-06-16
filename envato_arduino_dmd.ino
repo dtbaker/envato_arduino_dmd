@@ -5,11 +5,14 @@
   */
 
 
-// configuration:
+// TODO: move this out to an include file so we can commit changes via git easier.
 const char envato_username[] = "USERNAME_HERE";
 const char envato_api_key[] = "API_KEY_HERE";
-#define BUZZPIN 2
-#define CHECK_EVERY 60 // seconds
+#define BUZZPIN 2 // which pin is the piezo buzzer connected to (that buzzes when we make a sale)
+#define MOTORPIN 2 // which pin is our little motor connected to (that spins when we make a sale)
+/* C QUESTION: what would the difference between 'define' and 'long' for this check_interval: */
+long check_interval = 120; // seconds
+#define INC_AMOUNT 1 // when we count up, count up by this amount each time (eg: 1, 5, 10). 1 is fine.
 #define enableSerial false
 
 
@@ -20,11 +23,10 @@ const char envato_api_key[] = "API_KEY_HERE";
 #include <DMD.h>
 #include <TimerOne.h>  
 #include "Arial14.h"
-#define DMD_REFRESH_EVERY 100
-#define DMD_CLEAR_EVERY 100
 #define da 1
 #define dd 1
 #define DMD_TOP_CHAR 1
+#define do_dmd_detach_during_network true // just testing trying to fix the blinking DMD display during network operations.
 DMD dmd(da,dd);
 void ScanDMD(){ 
   dmd.scanDisplayBySPI();
@@ -39,11 +41,16 @@ void ScanDMD(){
 byte mac[] = { 0x1E, 0xDA, 0xBE, 0x5F, 0xF1, 0x3D};
 IPAddress server(184,106,5,33); // marketplace.envato.com IP
 //IPAddress server(192,168,0,12); //debug laptop
+/* C QUESTION: should this client be defined here or just before where it is used in the loop()? Differences? */
 EthernetClient client;
 char api_url[] = "http://marketplace.envato.com/api/edge/";
 
 
+/* C QUESTION: should these variables be declaired here or in the loop()? what difference does it make? */
+
+long previousMillis = 0;        // will store last time we processed
 float amount_today = 0;  // how much we have earnt today.
+/* C QUESTION: do I need to initialise this statement_json to be an empty string? */
 char statement_json[200];
 unsigned int statement_json_ptr = 0;
 
@@ -64,13 +71,13 @@ char last_statement_item_timestamp[19]; // when our last sale was made. so we ca
 char this_statement_item_timestamp[19]; // a string copy of "occured_at" so we can comare it to todays_date 
 
 
-//char latest_kind[13], latest_description[80], latest_occured_at[19], latest_amount[2];
     
 void setup() {
   // start serial port:
   if(enableSerial)Serial.begin(9600);
   if(enableSerial)Serial.println("Starting...");
   pinMode(BUZZPIN, OUTPUT);
+  pinMode(MOTORPIN, OUTPUT);
   
   // start the Ethernet connection:
   if (Ethernet.begin(mac) == 0) {
@@ -85,17 +92,22 @@ void setup() {
   // start DMD stuff
   dmd.clearScreen( true );
   dmd.selectFont(Arial_14);
-  Timer1.initialize( 3000 );           //period in microseconds to call ScanDMD. Anything longer than 5000 (5ms) and you can see flicker.
+  Timer1.initialize( 2500 );           //period in microseconds to call ScanDMD. Anything longer than 5000 (5ms) and you can see flicker.
   Timer1.attachInterrupt( ScanDMD );  
   
+  previousMillis = check_interval*1000; // so we can start straight away.
   
-  set_current_balance(0);
+  set_current_balance(amount_today);
 }
 
+/*
+ * Sets the current daily balance.
+ * If the balance is higher than past balance, it will buzz as it counts up to new balance.
+ */
 void set_current_balance(int amount){
   if(enableSerial)Serial.println(amount);
   int c = 0;
-  for(int i = amount_today; i < amount; i += 1){
+  for(int i = amount_today; i < amount; i += INC_AMOUNT){
     //if(enableSerial)Serial.println(i);
     if(c++%5 == 0){
       digitalWrite(BUZZPIN,HIGH);
@@ -109,16 +121,38 @@ void set_current_balance(int amount){
   draw_dmd_dollar(amount_today);
 }
 
+/*
+ * We can spin a little motor when we make a sale etc..
+ */
+void spin_motor(){
+    digitalWrite(MOTORPIN,HIGH);
+    delay(40);
+    digitalWrite(MOTORPIN,LOW); 
+}
+
 void loop() {
+  unsigned long currentMillis = millis();
+  if((currentMillis - previousMillis) < (check_interval*1000)) {
+    if(enableSerial)Serial.println("skip... ");
+    delay(1000);
+    return;
+  }
+  previousMillis = currentMillis;   
+    
   if(enableSerial)Serial.println("looping...");
   
+  spin_motor(); // spin for debugging every time we loop. remove this later.
+      
   earnt_today = 0;
   token_count = 0;
   record_statement = false;
   latest_statement = true;
   isfunky = false;
   
+  
+  //if(do_dmd_detach_during_network)Timer1.detachInterrupt( );  
   if (client.connect(server, 80)) {
+    
     //if(enableSerial)Serial.print("Connected to API! Requesting: ");
     if(enableSerial)Serial.println(api_url);
     client.print("GET ");
@@ -132,6 +166,7 @@ void loop() {
     client.println("User-Agent: arduino-dtbaker");
     client.println("Connection: close");
     client.println();
+    //if(do_dmd_detach_during_network)Timer1.attachInterrupt( ScanDMD );  
     
     if(enableSerial)Serial.println("Sent.. waiting");
 
@@ -155,11 +190,15 @@ void loop() {
     
     charsread = 0;
     
-    boolean do_detach = true;
-    if(do_detach)Timer1.detachInterrupt( );  
+    
+    char latest_kind[13], latest_description[80];
+    boolean do_notification = false;
+
     while (client.connected()) {
       if (client.available()) {
+        if(do_dmd_detach_during_network)Timer1.detachInterrupt( );  
         cr = client.read();
+        if(do_dmd_detach_during_network)Timer1.attachInterrupt( ScanDMD );  
         if (cr == '{') { 
           charsread++;// hack to skip the first { from {statement:
           if(charsread>1){
@@ -201,7 +240,7 @@ void loop() {
                     description=&statement_json[i];
                     break;
                   case 4: // occured at
-                    statement_json[i+20] = '\0';
+                    statement_json[ (i+20 >= sizeof(statement_json)) ? sizeof(statement_json)-1 : i+20] = '\0';
                     strncpy(this_statement_item_timestamp, &statement_json[i], sizeof(this_statement_item_timestamp)-1);
                     //occured_at=&statement_json[i];
                     strncpy(this_statement_date, &statement_json[i], sizeof(this_statement_date)-1);
@@ -237,12 +276,6 @@ void loop() {
                 
                 
                 
-                //strncpy(latest_kind,kind,sizeof(latest_kind)-1);
-                //strcpy(latest_amount,amount);
-                //strncpy(latest_description,description,sizeof(latest_description)-1);
-                //strncpy(latest_occured_at,occured_at,sizeof(latest_occured_at)-1);
-                
-                
                 // we have to check if this item is the same as the last one we found in the last loop.
                 // we do this via comparing "this_timestamp" to "todays_date".
                 if(strcmp(this_statement_item_timestamp,last_statement_item_timestamp)){
@@ -253,9 +286,16 @@ void loop() {
                   if(enableSerial)Serial.println(" so we're UPDATING OUR DIASPLAY!");
                   strncpy(last_statement_item_timestamp,this_statement_item_timestamp,sizeof(last_statement_item_timestamp)-1);
                   
-                  if(do_detach)Timer1.attachInterrupt( ScanDMD ); 
-                  display_notification(kind, amount, description, this_statement_item_timestamp);
-                  if(do_detach)Timer1.detachInterrupt( );  
+                  do_notification = true;
+                  
+                  strncpy(latest_kind,kind,sizeof(latest_kind)-1);
+                  strncpy(latest_description,description,sizeof(latest_description)-1);
+                  //strcpy(latest_amount,amount);
+                  //strncpy(latest_occured_at,occured_at,sizeof(latest_occured_at)-1);
+                  
+                  //if(do_dmd_detach_during_network)Timer1.attachInterrupt( ScanDMD ); 
+                  //display_notification(kind, amount, description, this_statement_item_timestamp);
+                  //if(do_dmd_detach_during_network)Timer1.detachInterrupt( );  
                   
                   
                 }else{
@@ -307,6 +347,7 @@ void loop() {
           if(last_cr != NULL && last_cr != '"' && last_cr != '[' && last_cr != '}'){
             //statement_json.concat(last_cr);
 
+            if(statement_json_ptr >= sizeof(statement_json)-1)break;
             statement_json[statement_json_ptr] = last_cr;
             statement_json_ptr++;
             statement_json[statement_json_ptr] = '\0';
@@ -320,8 +361,12 @@ void loop() {
       }
     
     } 
-    if(do_detach)Timer1.attachInterrupt( ScanDMD );  
+    //if(do_dmd_detach_during_network)Timer1.attachInterrupt( ScanDMD );  
   //
+  if(do_notification){
+    //display_notification(latest_kind, amount, latest_description, this_statement_item_timestamp);
+    display_notification(latest_kind, latest_description);
+  }
   
     set_current_balance(earnt_today);
     
@@ -337,7 +382,6 @@ void loop() {
   }
   
               if(enableSerial)Serial.println(" ---- LOOP FINISHED ----- ");
-  delay(CHECK_EVERY*1000);
 }
 
 void draw_dmd_dollar(int dollar){
@@ -369,7 +413,8 @@ void draw_dmd_marquee(const char *text){
 }
 
 
-void display_notification(char *kind, char *amount, char *description, char *occured_at){
+//void display_notification(char *kind, char *amount, char *description, char *occured_at){
+void display_notification(char *kind, char *description){
     // we have all 4 items required for a valid API result!
     // time to make some noise.
     digitalWrite(BUZZPIN,HIGH);
